@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# =========================================================
+# Azure IoT Edge One-Command Setup Script
+# Generated: 2025-05-08 07:41:46
+# Author: Ha7him123
+# =========================================================
+
 # Colors for terminal output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -286,8 +292,8 @@ check_iotedge_status() {
     fi
 }
 
-# Validate the connection string format
-if ! [[ "$CONNECTION_STRING" =~ ^HostName=.*;DeviceId=.*;SharedAccessKey=.* ]]; then
+# Validate the connection string format - FIXED SYNTAX FOR REGEX
+if ! echo "$CONNECTION_STRING" | grep -q "HostName=.*\;DeviceId=.*\;SharedAccessKey=.*"; then
     print_error "Invalid connection string format. It should include HostName, DeviceId, and SharedAccessKey."
     exit 1
 fi
