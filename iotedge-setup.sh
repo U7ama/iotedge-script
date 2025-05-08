@@ -2,7 +2,7 @@
 
 # =========================================================
 # Azure IoT Edge One-Command Setup Script
-# Generated: 2025-05-08 07:41:46
+# Generated: 2025-05-08 07:47:09
 # Author: Ha7him123
 # =========================================================
 
@@ -66,6 +66,46 @@ print_error() {
 print_header() {
     echo -e "${BLUE}$1${NC}"
 }
+
+# Validate connection string using simple string checks (no regex)
+validate_connection_string() {
+    local conn_str="$1"
+    
+    # Check for required components
+    if [[ "$conn_str" != *"HostName="* ]]; then
+        return 1
+    fi
+    
+    if [[ "$conn_str" != *"DeviceId="* ]]; then
+        return 1
+    fi
+    
+    if [[ "$conn_str" != *"SharedAccessKey="* ]]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# Validate the connection string
+if ! validate_connection_string "$CONNECTION_STRING"; then
+    print_error "Invalid connection string format. It should include HostName, DeviceId, and SharedAccessKey."
+    exit 1
+fi
+
+# Extract device info from connection string using cut instead of regex
+get_connection_string_value() {
+    local conn_str="$1"
+    local key="$2"
+    
+    # Extract the portion after the key
+    local value=$(echo "$conn_str" | tr ';' '\n' | grep "^$key=" | cut -d'=' -f2)
+    echo "$value"
+}
+
+# Extract device info
+DEVICE_ID=$(get_connection_string_value "$CONNECTION_STRING" "DeviceId")
+HOSTNAME=$(get_connection_string_value "$CONNECTION_STRING" "HostName")
 
 # Installation status tracking
 declare -A STATUS_TRACKER
@@ -291,16 +331,6 @@ check_iotedge_status() {
         return 3  # Not installed
     fi
 }
-
-# Validate the connection string format - FIXED SYNTAX FOR REGEX
-if ! echo "$CONNECTION_STRING" | grep -q "HostName=.*\;DeviceId=.*\;SharedAccessKey=.*"; then
-    print_error "Invalid connection string format. It should include HostName, DeviceId, and SharedAccessKey."
-    exit 1
-fi
-
-# Device info extracted from connection string
-DEVICE_ID=$(echo $CONNECTION_STRING | grep -oP 'DeviceId=\K[^;]+')
-HOSTNAME=$(echo $CONNECTION_STRING | grep -oP 'HostName=\K[^;]+')
 
 print_header "======================================================"
 print_header "IoT Edge Automated Setup Script"
