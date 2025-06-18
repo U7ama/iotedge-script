@@ -349,7 +349,6 @@ check_iotedge_status() {
         return 3  # Not installed
     fi
 }
-
 # Function to deploy modules from a JSON deployment file
 deploy_modules_from_json() {
     local deployment_file="$1"
@@ -371,10 +370,6 @@ deploy_modules_from_json() {
     print_status "Deploying modules from JSON file: $deployment_file"
     update_status "module_deployment" "In Progress"
     
-    # Create a temporary file with the deployment content
-    local temp_file=$(mktemp)
-    cat "$deployment_file" > "$temp_file"
-    
     # Pre-pull container images to avoid timeouts
     print_status "Pre-pulling required container images to avoid timeouts..."
     # Try to extract image names from the JSON file
@@ -390,22 +385,17 @@ deploy_modules_from_json() {
         fi
     done
     
-    # Apply deployment using the IoT Edge CLI
+    # Apply deployment using the IoT Edge deployment method
     print_status "Applying module deployment..."
     
     # Check if we need to extract authentication from connection string
     if [[ "$deployment_file" == *".layered."* || "$deployment_file" == *"layered"* ]]; then
         print_status "Detected layered deployment format. Applying as layered deployment..."
-        # For layered deployments, we need to use a different approach
-        # This would typically be done through IoT Hub, not locally
         print_warning "Layered deployments cannot be applied directly to the device."
         print_warning "Please use the Azure Portal or Azure CLI to apply layered deployments."
         update_status "module_deployment" "Skipped (Layered)"
         return 0
     fi
-    
-    # Stopping any existing modules to ensure clean deployment
-    print_status "Preparing system for deployment..."
     
     # Check if Edge Agent is running before deploying
     print_status "Checking Edge Agent status..."
@@ -415,43 +405,44 @@ deploy_modules_from_json() {
         sleep 30
     fi
     
-    # Apply with increasing timeout values
-    print_status "Applying module deployment with extended timeout..."
+    # For IoT Edge 1.4+, deployments need to be placed in the config.d directory
+    print_status "Using IoT Edge config directory deployment method..."
     
-    # Try deployment with progressively longer timeouts
-    for timeout in 120 240 360; do
-        print_status "Attempting deployment with ${timeout}s timeout..."
-        
-        if timeout ${timeout}s iotedge config import "$temp_file"; then
-            print_status "Module deployment successfully applied!"
-            
-            # Remove the temporary file
-            rm -f "$temp_file"
-            
-            # Wait for modules to start
-            print_status "Waiting for modules to initialize (this may take a few minutes)..."
-            for i in {1..12}; do
-                echo -n "."
-                sleep 10
-            done
-            echo ""
-            
-            # List modules to verify deployment
-            print_status "Current modules:"
-            iotedge list
-            
-            update_status "module_deployment" "Success"
-            report_status "DEPLOYED" "IoT Edge modules successfully deployed from JSON file"
-            return 0
-        else
-            print_warning "Deployment timed out after ${timeout}s. Trying with longer timeout..."
-        fi
+    # Create config directory if it doesn't exist
+    mkdir -p /etc/aziot/config.d/
+    
+    # Copy the deployment file to the deployment directory
+    print_status "Copying deployment to IoT Edge config directory..."
+    cp "$deployment_file" /etc/aziot/config.d/deployment.json
+    
+    # Restart IoT Edge to apply the configuration
+    print_status "Restarting IoT Edge to apply deployment..."
+    systemctl restart aziot-edged
+    
+    # Wait for deployment to apply
+    print_status "Waiting for modules to initialize (this may take a few minutes)..."
+    for i in {1..12}; do
+        echo -n "."
+        sleep 10
     done
+    echo ""
     
-    print_error "Failed to apply module deployment after multiple attempts"
-    update_status "module_deployment" "Failed"
-    rm -f "$temp_file"
-    return 1
+    # Check if modules are running
+    print_status "Current modules:"
+    iotedge list
+    
+    # Check if we have modules running now
+    if iotedge list | grep -q "running"; then
+        print_status "Module deployment successful!"
+        update_status "module_deployment" "Success"
+        report_status "DEPLOYED" "IoT Edge modules successfully deployed from JSON file"
+        return 0
+    else
+        print_warning "Some modules may not have started yet, check the status later."
+        update_status "module_deployment" "Warning"
+        report_status "WARNING" "IoT Edge modules deployed but may not all be running"
+        return 0
+    fi
 }
 
 print_header "======================================================"
