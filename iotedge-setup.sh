@@ -1,11 +1,5 @@
 #!/bin/bash
 
-# =========================================================
-# Azure IoT Edge One-Command Setup Script
-# Generated: 2025-05-08 07:47:09
-# Author: Ha7him123
-# =========================================================
-
 # Colors for terminal output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
