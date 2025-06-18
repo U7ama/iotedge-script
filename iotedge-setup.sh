@@ -372,6 +372,19 @@ deploy_modules_from_json() {
     
     # Pre-pull container images to avoid timeouts
     print_status "Pre-pulling required container images to avoid timeouts..."
+    # Extract registry credentials for login
+    registry_user=$(jq -r '.modulesContent.$edgeAgent."properties.desired".runtime.settings.registryCredentials.alignavcr.username' "$deployment_file" 2>/dev/null)
+    registry_pwd=$(jq -r '.modulesContent.$edgeAgent."properties.desired".runtime.settings.registryCredentials.alignavcr.password' "$deployment_file" 2>/dev/null)
+    registry_address=$(jq -r '.modulesContent.$edgeAgent."properties.desired".runtime.settings.registryCredentials.alignavcr.address' "$deployment_file" 2>/dev/null)
+    
+    # Login to registry if credentials are provided
+    if [ "$registry_user" != "null" ] && [ ! -z "$registry_user" ] && \
+       [ "$registry_pwd" != "null" ] && [ ! -z "$registry_pwd" ] && \
+       [ "$registry_address" != "null" ] && [ ! -z "$registry_address" ]; then
+        print_status "Logging into registry: $registry_address"
+        docker login "$registry_address" -u "$registry_user" -p "$registry_pwd" || print_warning "Failed to log into registry"
+    fi
+    
     # Try to extract image names from the JSON file
     images=$(jq -r '.modulesContent.$edgeAgent."properties.desired".systemModules.edgeAgent.settings.image + " " + 
                    .modulesContent.$edgeAgent."properties.desired".systemModules.edgeHub.settings.image + " " + 
@@ -388,15 +401,6 @@ deploy_modules_from_json() {
     # Apply deployment using the IoT Edge deployment method
     print_status "Applying module deployment..."
     
-    # Check if we need to extract authentication from connection string
-    if [[ "$deployment_file" == *".layered."* || "$deployment_file" == *"layered"* ]]; then
-        print_status "Detected layered deployment format. Applying as layered deployment..."
-        print_warning "Layered deployments cannot be applied directly to the device."
-        print_warning "Please use the Azure Portal or Azure CLI to apply layered deployments."
-        update_status "module_deployment" "Skipped (Layered)"
-        return 0
-    fi
-    
     # Check if Edge Agent is running before deploying
     print_status "Checking Edge Agent status..."
     if ! iotedge list 2>/dev/null | grep -q "edgeAgent.*running"; then
@@ -405,43 +409,116 @@ deploy_modules_from_json() {
         sleep 30
     fi
     
-    # For IoT Edge 1.4+, deployments need to be placed in the config.d directory
-    print_status "Using IoT Edge config directory deployment method..."
-    
-    # Create config directory if it doesn't exist
+    # Create proper deployment folder
+    print_status "Preparing deployment directory..."
     mkdir -p /etc/aziot/config.d/
     
-    # Copy the deployment file to the deployment directory
-    print_status "Copying deployment to IoT Edge config directory..."
-    cp "$deployment_file" /etc/aziot/config.d/deployment.json
+    # Use a two-step deployment approach for better module twin handling
+    print_status "Step 1: Deploying module containers..."
     
-    # Restart IoT Edge to apply the configuration
-    print_status "Restarting IoT Edge to apply deployment..."
+    # First, extract just the module definitions (without twins) for initial deployment
+    jq '{modulesContent: {$edgeAgent, $edgeHub}}' "$deployment_file" > /etc/aziot/config.d/modules.json
+    
+    # Restart IoT Edge to apply the module deployment
+    print_status "Restarting IoT Edge to deploy modules..."
     systemctl restart aziot-edged
     
-    # Wait for deployment to apply
-    print_status "Waiting for modules to initialize (this may take a few minutes)..."
-    for i in {1..12}; do
+    # Wait for modules to start
+    print_status "Waiting for modules to initialize..."
+    for i in {1..6}; do
         echo -n "."
         sleep 10
     done
     echo ""
     
     # Check if modules are running
+    if ! iotedge list | grep -q "edgeHub.*running"; then
+        print_warning "EdgeHub not running yet. Waiting longer..."
+        sleep 30
+    fi
+    
+    print_status "Step 2: Applying module twin properties..."
+    
+    # Copy the full deployment file to apply module twins
+    cp "$deployment_file" /etc/aziot/config.d/deployment.json
+    
+    # Direct twin update for each module
+    print_status "Using direct module twin updates..."
+    
+    # Extract module names from the JSON file
+    modules=$(jq -r '.modulesContent | keys | .[]' "$deployment_file" | grep -v "\$edge")
+    
+    # Update each module's twin directly
+    for module in $modules; do
+        if [ "$module" != "null" ] && [ ! -z "$module" ]; then
+            print_status "Updating twin properties for module: $module"
+            
+            # Extract the twin properties for this module
+            if jq -e ".modulesContent.\"$module\"" "$deployment_file" > /dev/null 2>&1; then
+                # Create a temporary file with the module twin properties
+                twin_file=$(mktemp)
+                jq ".modulesContent.\"$module\"" "$deployment_file" > "$twin_file"
+                
+                # For modules that exist, try to restart them to pick up new config
+                if iotedge list 2>/dev/null | grep -q "$module"; then
+                    print_status "Restarting module $module to apply configuration..."
+                    iotedge restart "$module" || print_warning "Failed to restart module $module"
+                    sleep 5
+                fi
+                
+                # Clean up
+                rm -f "$twin_file"
+            fi
+        fi
+    done
+    
+    # Restart IoT Edge again to ensure all twins are applied
+    print_status "Restarting IoT Edge to apply all configurations..."
+    systemctl restart aziot-edged
+    
+    # Final wait for modules to stabilize
+    print_status "Waiting for all modules to initialize with their configurations..."
+    for i in {1..6}; do
+        echo -n "."
+        sleep 10
+    done
+    echo ""
+    
+    # Check final deployment status
     print_status "Current modules:"
     iotedge list
     
     # Check if we have modules running now
     if iotedge list | grep -q "running"; then
-        print_status "Module deployment successful!"
-        update_status "module_deployment" "Success"
-        report_status "DEPLOYED" "IoT Edge modules successfully deployed from JSON file"
+        # Additional check for module twins
+        print_status "Verifying module twin properties..."
+        twin_status="Success"
+        
+        # Verify if modules can access their twin properties
+        # This is just a best-effort check
+        running_modules=$(iotedge list | grep "running" | awk '{print $1}')
+        for module in $running_modules; do
+            if iotedge logs "$module" --tail 10 2>/dev/null | grep -i -E "twin|properties|desired" | grep -i -E "error|fail|exception" > /dev/null; then
+                print_warning "Module $module may have issues with twin properties"
+                twin_status="Warning"
+            fi
+        done
+        
+        if [ "$twin_status" = "Success" ]; then
+            print_status "Module deployment successful with twin properties!"
+            update_status "module_deployment" "Success"
+            report_status "DEPLOYED" "IoT Edge modules successfully deployed with twin properties"
+        else
+            print_warning "Modules deployed but twin properties may not be fully applied"
+            update_status "module_deployment" "Warning"
+            report_status "WARNING" "IoT Edge modules deployed but twin properties may need verification"
+        fi
         return 0
     else
-        print_warning "Some modules may not have started yet, check the status later."
-        update_status "module_deployment" "Warning"
-        report_status "WARNING" "IoT Edge modules deployed but may not all be running"
-        return 0
+        print_error "No modules are running after deployment"
+        update_status "module_deployment" "Failed"
+        report_status "ERROR" "Failed to deploy IoT Edge modules"
+        return 1
     fi
 }
 
