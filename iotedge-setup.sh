@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# =========================================================
+# Azure IoT Edge One-Command Setup Script
+# Generated: 2025-05-08 07:47:09
+# Author: Ha7him123
+# =========================================================
+
 # Colors for terminal output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -18,17 +24,8 @@ while [[ $# -gt 0 ]]; do
       CALLBACK_URL="$2"
       shift 2
       ;;
-    --deployment-file)
-      DEPLOYMENT_FILE="$2"
-      shift 2
-      ;;
     --help)
-      echo "Usage: $0 --connection-string \"HostName=...\" [--callback-url \"https://...\"] [--deployment-file \"./deployment.template\"]"
-      echo ""
-      echo "Options:"
-      echo "  --connection-string   IoT Edge device connection string (required)"
-      echo "  --callback-url        URL to report installation status (optional)"
-      echo "  --deployment-file     Path to JSON deployment file for IoT Edge modules (optional)"
+      echo "Usage: $0 --connection-string \"HostName=...\" [--callback-url \"https://...\"]"
       exit 0
       ;;
     *)
@@ -121,7 +118,6 @@ STATUS_TRACKER["iotedge_service"]="Not Started"
 STATUS_TRACKER["edge_agent"]="Not Started"
 STATUS_TRACKER["edge_hub"]="Not Started"
 STATUS_TRACKER["connectivity"]="Not Started"
-STATUS_TRACKER["module_deployment"]="Not Started"
 
 update_status() {
     local component="$1"
@@ -163,9 +159,6 @@ print_installation_summary() {
             "In Progress"*)
                 echo -e "${YELLOW}$status${NC}"
                 ;;
-            "Skipped"*)
-                echo -e "${BLUE}$status${NC}"
-                ;;
             *)
                 echo -e "$status"
                 ;;
@@ -181,11 +174,6 @@ print_installation_summary() {
     echo -e "Edge Agent Module: $(format_status "${STATUS_TRACKER["edge_agent"]}")"
     echo -e "Edge Hub Module: $(format_status "${STATUS_TRACKER["edge_hub"]}")"
     echo -e "IoT Hub Connectivity: $(format_status "${STATUS_TRACKER["connectivity"]}")"
-    
-    # Show module deployment status only if a deployment file was provided
-    if [ ! -z "$DEPLOYMENT_FILE" ]; then
-        echo -e "Module Deployment: $(format_status "${STATUS_TRACKER["module_deployment"]}")"
-    fi
     
     print_header "======================================================"
     
@@ -215,16 +203,10 @@ print_installation_summary() {
     
     print_header "======================================================"
     print_header "Next Steps:"
-    if [ -z "$DEPLOYMENT_FILE" ]; then
-        print_header "1. Return to the deployment portal"
-        print_header "2. Select your desired monitoring modules"
-        print_header "3. Provide any required credentials"
-        print_header "4. Deploy modules to your IoT Edge device"
-    else
-        print_header "1. Your modules have been deployed from the provided JSON file"
-        print_header "2. Check module status with: iotedge list"
-        print_header "3. View module logs with: iotedge logs [MODULE_NAME]"
-    fi
+    print_header "1. Return to the deployment portal"
+    print_header "2. Select your desired monitoring modules"
+    print_header "3. Provide any required credentials"
+    print_header "4. Deploy modules to your IoT Edge device"
     print_header "======================================================"
     
     # Print device info for reference
@@ -349,176 +331,6 @@ check_iotedge_status() {
         return 3  # Not installed
     fi
 }
-# Function to deploy modules from a JSON deployment file
-deploy_modules_from_json() {
-    local deployment_file="$1"
-    
-    # Check if file exists
-    if [ ! -f "$deployment_file" ]; then
-        print_error "Deployment file not found: $deployment_file"
-        update_status "module_deployment" "Failed"
-        return 1
-    fi
-    
-    # Check if file is a valid JSON
-    if ! jq empty "$deployment_file" 2>/dev/null; then
-        print_error "Invalid JSON in deployment file: $deployment_file"
-        update_status "module_deployment" "Failed"
-        return 1
-    fi
-    
-    print_status "Deploying modules from JSON file: $deployment_file"
-    update_status "module_deployment" "In Progress"
-    
-    # Pre-pull container images to avoid timeouts
-    print_status "Pre-pulling required container images to avoid timeouts..."
-    # Extract registry credentials for login
-    registry_user=$(jq -r '.modulesContent."$edgeAgent"."properties.desired".runtime.settings.registryCredentials.alignavcr.username' "$deployment_file" 2>/dev/null)
-    registry_pwd=$(jq -r '.modulesContent."$edgeAgent"."properties.desired".runtime.settings.registryCredentials.alignavcr.password' "$deployment_file" 2>/dev/null)
-    registry_address=$(jq -r '.modulesContent."$edgeAgent"."properties.desired".runtime.settings.registryCredentials.alignavcr.address' "$deployment_file" 2>/dev/null)
-    
-    # Login to registry if credentials are provided
-    if [ "$registry_user" != "null" ] && [ ! -z "$registry_user" ] && \
-       [ "$registry_pwd" != "null" ] && [ ! -z "$registry_pwd" ] && \
-       [ "$registry_address" != "null" ] && [ ! -z "$registry_address" ]; then
-        print_status "Logging into registry: $registry_address"
-        docker login "$registry_address" -u "$registry_user" -p "$registry_pwd" || print_warning "Failed to log into registry"
-    fi
-    
-    # Try to extract image names from the JSON file - properly escaping $ in key names
-    images=$(jq -r '.modulesContent."$edgeAgent"."properties.desired".systemModules.edgeAgent.settings.image + " " + 
-                   .modulesContent."$edgeAgent"."properties.desired".systemModules.edgeHub.settings.image + " " + 
-                   (.modulesContent."$edgeAgent"."properties.desired".modules | to_entries[] | .value.settings.image)' "$deployment_file" 2>/dev/null)
-    
-    # Pull each image
-    for image in $images; do
-        if [ "$image" != "null" ] && [ ! -z "$image" ]; then
-            print_status "Pre-pulling image: $image"
-            docker pull "$image" || print_warning "Failed to pre-pull image: $image, will try during deployment"
-        fi
-    done
-    
-    # Check if Edge Agent is running before deploying
-    print_status "Checking Edge Agent status..."
-    if ! iotedge list 2>/dev/null | grep -q "edgeAgent.*running"; then
-        print_warning "Edge Agent not running. Attempting to restart IoT Edge service..."
-        systemctl restart aziot-edged
-        sleep 30
-    fi
-    
-    # Create proper deployment folder
-    print_status "Setting up deployment..."
-    mkdir -p /etc/aziot/config.d/
-    
-    # Check docker logs for any issues before deployment
-    print_status "Checking Docker resources and logs..."
-    docker system df
-    docker ps -a
-    
-    # Stop and remove any failed containers
-    print_status "Cleaning up any failed containers..."
-    docker ps -a | grep -i Exit | awk '{print $1}' | xargs -r docker rm
-    
-    # Ensure enough disk space
-    print_status "Ensuring sufficient disk space..."
-    docker system prune -f
-    
-    # Direct deployment approach
-    print_status "Using direct deployment method..."
-    
-    # Copy the deployment file to the IoT Edge configuration directory
-    print_status "Copying deployment file to IoT Edge config directory..."
-    cp "$deployment_file" /etc/aziot/config.d/deployment.json
-    
-    # Increase timeouts for IoT Edge
-    print_status "Increasing IoT Edge timeouts for reliable deployment..."
-    if [ -f /etc/aziot/config.toml ]; then
-        # Create backup
-        cp /etc/aziot/config.toml /etc/aziot/config.toml.bak
-        
-        # Add or update agent section for extended timeouts
-        if grep -q "\[agent\]" /etc/aziot/config.toml; then
-            # Update existing timeouts
-            sed -i 's/\(runtime_request_timeout *= *\).*$/\1"10m"/' /etc/aziot/config.toml
-            sed -i 's/\(image_download_timeout *= *\).*$/\1"20m"/' /etc/aziot/config.toml
-        else
-            # Add timeout configuration
-            cat >> /etc/aziot/config.toml << EOF
-
-[agent]
-runtime_request_timeout = "10m"
-image_download_timeout = "20m"
-EOF
-        fi
-    fi
-    
-    # Restart IoT Edge to apply the configuration
-    print_status "Restarting IoT Edge to apply deployment (first attempt)..."
-    systemctl restart aziot-edged
-    
-    # Wait for modules to start
-    print_status "Waiting for modules to initialize (this may take a few minutes)..."
-    for i in {1..15}; do
-        echo -n "."
-        sleep 10
-    done
-    echo ""
-    
-    # Check if modules are running
-    print_status "Current modules (first check):"
-    iotedge list
-    
-    # If EdgeHub isn't running, apply a second restart
-    if ! iotedge list | grep -q "edgeHub.*running"; then
-        print_warning "EdgeHub not running yet. Trying a second restart..."
-        
-        # Check what's wrong with EdgeHub
-        print_status "Checking EdgeHub logs:"
-        iotedge logs edgeHub --tail 20 || true
-        
-        # Check container status
-        docker ps -a | grep edgeHub
-        
-        # Try second restart
-        systemctl restart aziot-edged
-        
-        print_status "Waiting after second restart..."
-        sleep 60
-        
-        # Check module status again
-        print_status "Current modules (second check):"
-        iotedge list
-    fi
-    
-    # Check the storage module specifically
-    print_status "Checking blob storage module logs:"
-    iotedge logs azureblobstorageoniotedge --tail 20 || true
-    
-    # Check if any modules are running
-    if iotedge list | grep -q "running"; then
-        print_status "At least some modules are running - deployment partially successful"
-        update_status "module_deployment" "Success"
-        report_status "DEPLOYED" "IoT Edge modules deployed - some modules may require attention"
-        
-        # Provide error guidance for failed modules
-        if iotedge list | grep -q "fail\|error"; then
-            print_warning "Some modules failed to start. Common causes:"
-            print_warning "1. Memory/CPU constraints - check with 'free -m' and 'top'"
-            print_warning "2. Network connectivity issues to registries or endpoints"
-            print_warning "3. Invalid module configurations or environment variables"
-            print_warning "4. Storage permission issues, especially for blob storage module"
-            print_warning ""
-            print_warning "Try fixing blob storage with: sudo mkdir -p /home/alignav && sudo chmod 777 /home/alignav"
-        fi
-        
-        return 0
-    else
-        print_error "No modules are running after deployment"
-        update_status "module_deployment" "Failed"
-        report_status "ERROR" "Failed to deploy IoT Edge modules"
-        return 1
-    fi
-}
 
 print_header "======================================================"
 print_header "IoT Edge Automated Setup Script"
@@ -588,14 +400,6 @@ if [ $iotedge_status_code -eq 0 ]; then
         update_status "edge_hub" "Not Running"
     fi
     
-    # Check if we have a deployment file and should deploy modules
-    if [ ! -z "$DEPLOYMENT_FILE" ]; then
-        print_status "Deployment file provided, deploying modules..."
-        deploy_modules_from_json "$DEPLOYMENT_FILE"
-    else
-        update_status "module_deployment" "Skipped"
-    fi
-    
     report_status "READY" "IoT Edge reconfigured successfully"
     print_header "======================================================"
     print_header "IoT Edge has been reconfigured with the new connection string"
@@ -617,9 +421,9 @@ apt-get update || {
 }
 
 # Install curl and other prerequisites if not already installed
-if ! is_package_installed "curl" || ! is_package_installed "gnupg2" || ! is_package_installed "apt-transport-https" || ! is_package_installed "jq"; then
+if ! is_package_installed "curl" || ! is_package_installed "gnupg2" || ! is_package_installed "apt-transport-https"; then
     print_status "Installing prerequisites..."
-    check_command "apt-get install -y curl gnupg2 apt-transport-https ca-certificates jq" "Failed to install prerequisites" "prerequisites" 3 5
+    check_command "apt-get install -y curl gnupg2 apt-transport-https ca-certificates" "Failed to install prerequisites" "prerequisites" 3 5
 else
     print_status "Prerequisites already installed"
     update_status "prerequisites" "Success"
@@ -911,14 +715,6 @@ else
     print_warning "Edge Hub is not running yet"
     update_status "edge_hub" "Not Running"
     print_warning "This is normal for initial deployment, as edgeHub must be deployed separately"
-fi
-
-# If deployment file was provided, deploy modules
-if [ ! -z "$DEPLOYMENT_FILE" ]; then
-    print_status "Deployment file provided, deploying modules..."
-    deploy_modules_from_json "$DEPLOYMENT_FILE"
-else
-    update_status "module_deployment" "Skipped"
 fi
 
 print_installation_summary
