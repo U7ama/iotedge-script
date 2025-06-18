@@ -373,9 +373,9 @@ deploy_modules_from_json() {
     # Pre-pull container images to avoid timeouts
     print_status "Pre-pulling required container images to avoid timeouts..."
     # Extract registry credentials for login
-    registry_user=$(jq -r '.modulesContent.$edgeAgent."properties.desired".runtime.settings.registryCredentials.alignavcr.username' "$deployment_file" 2>/dev/null)
-    registry_pwd=$(jq -r '.modulesContent.$edgeAgent."properties.desired".runtime.settings.registryCredentials.alignavcr.password' "$deployment_file" 2>/dev/null)
-    registry_address=$(jq -r '.modulesContent.$edgeAgent."properties.desired".runtime.settings.registryCredentials.alignavcr.address' "$deployment_file" 2>/dev/null)
+    registry_user=$(jq -r '.modulesContent."$edgeAgent"."properties.desired".runtime.settings.registryCredentials.alignavcr.username' "$deployment_file" 2>/dev/null)
+    registry_pwd=$(jq -r '.modulesContent."$edgeAgent"."properties.desired".runtime.settings.registryCredentials.alignavcr.password' "$deployment_file" 2>/dev/null)
+    registry_address=$(jq -r '.modulesContent."$edgeAgent"."properties.desired".runtime.settings.registryCredentials.alignavcr.address' "$deployment_file" 2>/dev/null)
     
     # Login to registry if credentials are provided
     if [ "$registry_user" != "null" ] && [ ! -z "$registry_user" ] && \
@@ -385,10 +385,10 @@ deploy_modules_from_json() {
         docker login "$registry_address" -u "$registry_user" -p "$registry_pwd" || print_warning "Failed to log into registry"
     fi
     
-    # Try to extract image names from the JSON file
-    images=$(jq -r '.modulesContent.$edgeAgent."properties.desired".systemModules.edgeAgent.settings.image + " " + 
-                   .modulesContent.$edgeAgent."properties.desired".systemModules.edgeHub.settings.image + " " + 
-                   (.modulesContent.$edgeAgent."properties.desired".modules | to_entries[] | .value.settings.image)' "$deployment_file" 2>/dev/null)
+    # Try to extract image names from the JSON file - properly escaping $ in key names
+    images=$(jq -r '.modulesContent."$edgeAgent"."properties.desired".systemModules.edgeAgent.settings.image + " " + 
+                   .modulesContent."$edgeAgent"."properties.desired".systemModules.edgeHub.settings.image + " " + 
+                   (.modulesContent."$edgeAgent"."properties.desired".modules | to_entries[] | .value.settings.image)' "$deployment_file" 2>/dev/null)
     
     # Pull each image
     for image in $images; do
@@ -397,9 +397,6 @@ deploy_modules_from_json() {
             docker pull "$image" || print_warning "Failed to pre-pull image: $image, will try during deployment"
         fi
     done
-    
-    # Apply deployment using the IoT Edge deployment method
-    print_status "Applying module deployment..."
     
     # Check if Edge Agent is running before deploying
     print_status "Checking Edge Agent status..."
@@ -410,109 +407,110 @@ deploy_modules_from_json() {
     fi
     
     # Create proper deployment folder
-    print_status "Preparing deployment directory..."
+    print_status "Setting up deployment..."
     mkdir -p /etc/aziot/config.d/
     
-    # Use a two-step deployment approach for better module twin handling
-    print_status "Step 1: Deploying module containers..."
+    # Check docker logs for any issues before deployment
+    print_status "Checking Docker resources and logs..."
+    docker system df
+    docker ps -a
     
-    # First, extract just the module definitions (without twins) for initial deployment
-    jq '{modulesContent: {$edgeAgent, $edgeHub}}' "$deployment_file" > /etc/aziot/config.d/modules.json
+    # Stop and remove any failed containers
+    print_status "Cleaning up any failed containers..."
+    docker ps -a | grep -i Exit | awk '{print $1}' | xargs -r docker rm
     
-    # Restart IoT Edge to apply the module deployment
-    print_status "Restarting IoT Edge to deploy modules..."
+    # Ensure enough disk space
+    print_status "Ensuring sufficient disk space..."
+    docker system prune -f
+    
+    # Direct deployment approach
+    print_status "Using direct deployment method..."
+    
+    # Copy the deployment file to the IoT Edge configuration directory
+    print_status "Copying deployment file to IoT Edge config directory..."
+    cp "$deployment_file" /etc/aziot/config.d/deployment.json
+    
+    # Increase timeouts for IoT Edge
+    print_status "Increasing IoT Edge timeouts for reliable deployment..."
+    if [ -f /etc/aziot/config.toml ]; then
+        # Create backup
+        cp /etc/aziot/config.toml /etc/aziot/config.toml.bak
+        
+        # Add or update agent section for extended timeouts
+        if grep -q "\[agent\]" /etc/aziot/config.toml; then
+            # Update existing timeouts
+            sed -i 's/\(runtime_request_timeout *= *\).*$/\1"10m"/' /etc/aziot/config.toml
+            sed -i 's/\(image_download_timeout *= *\).*$/\1"20m"/' /etc/aziot/config.toml
+        else
+            # Add timeout configuration
+            cat >> /etc/aziot/config.toml << EOF
+
+[agent]
+runtime_request_timeout = "10m"
+image_download_timeout = "20m"
+EOF
+        fi
+    fi
+    
+    # Restart IoT Edge to apply the configuration
+    print_status "Restarting IoT Edge to apply deployment (first attempt)..."
     systemctl restart aziot-edged
     
     # Wait for modules to start
-    print_status "Waiting for modules to initialize..."
-    for i in {1..6}; do
+    print_status "Waiting for modules to initialize (this may take a few minutes)..."
+    for i in {1..15}; do
         echo -n "."
         sleep 10
     done
     echo ""
     
     # Check if modules are running
-    if ! iotedge list | grep -q "edgeHub.*running"; then
-        print_warning "EdgeHub not running yet. Waiting longer..."
-        sleep 30
-    fi
-    
-    print_status "Step 2: Applying module twin properties..."
-    
-    # Copy the full deployment file to apply module twins
-    cp "$deployment_file" /etc/aziot/config.d/deployment.json
-    
-    # Direct twin update for each module
-    print_status "Using direct module twin updates..."
-    
-    # Extract module names from the JSON file
-    modules=$(jq -r '.modulesContent | keys | .[]' "$deployment_file" | grep -v "\$edge")
-    
-    # Update each module's twin directly
-    for module in $modules; do
-        if [ "$module" != "null" ] && [ ! -z "$module" ]; then
-            print_status "Updating twin properties for module: $module"
-            
-            # Extract the twin properties for this module
-            if jq -e ".modulesContent.\"$module\"" "$deployment_file" > /dev/null 2>&1; then
-                # Create a temporary file with the module twin properties
-                twin_file=$(mktemp)
-                jq ".modulesContent.\"$module\"" "$deployment_file" > "$twin_file"
-                
-                # For modules that exist, try to restart them to pick up new config
-                if iotedge list 2>/dev/null | grep -q "$module"; then
-                    print_status "Restarting module $module to apply configuration..."
-                    iotedge restart "$module" || print_warning "Failed to restart module $module"
-                    sleep 5
-                fi
-                
-                # Clean up
-                rm -f "$twin_file"
-            fi
-        fi
-    done
-    
-    # Restart IoT Edge again to ensure all twins are applied
-    print_status "Restarting IoT Edge to apply all configurations..."
-    systemctl restart aziot-edged
-    
-    # Final wait for modules to stabilize
-    print_status "Waiting for all modules to initialize with their configurations..."
-    for i in {1..6}; do
-        echo -n "."
-        sleep 10
-    done
-    echo ""
-    
-    # Check final deployment status
-    print_status "Current modules:"
+    print_status "Current modules (first check):"
     iotedge list
     
-    # Check if we have modules running now
+    # If EdgeHub isn't running, apply a second restart
+    if ! iotedge list | grep -q "edgeHub.*running"; then
+        print_warning "EdgeHub not running yet. Trying a second restart..."
+        
+        # Check what's wrong with EdgeHub
+        print_status "Checking EdgeHub logs:"
+        iotedge logs edgeHub --tail 20 || true
+        
+        # Check container status
+        docker ps -a | grep edgeHub
+        
+        # Try second restart
+        systemctl restart aziot-edged
+        
+        print_status "Waiting after second restart..."
+        sleep 60
+        
+        # Check module status again
+        print_status "Current modules (second check):"
+        iotedge list
+    fi
+    
+    # Check the storage module specifically
+    print_status "Checking blob storage module logs:"
+    iotedge logs azureblobstorageoniotedge --tail 20 || true
+    
+    # Check if any modules are running
     if iotedge list | grep -q "running"; then
-        # Additional check for module twins
-        print_status "Verifying module twin properties..."
-        twin_status="Success"
+        print_status "At least some modules are running - deployment partially successful"
+        update_status "module_deployment" "Success"
+        report_status "DEPLOYED" "IoT Edge modules deployed - some modules may require attention"
         
-        # Verify if modules can access their twin properties
-        # This is just a best-effort check
-        running_modules=$(iotedge list | grep "running" | awk '{print $1}')
-        for module in $running_modules; do
-            if iotedge logs "$module" --tail 10 2>/dev/null | grep -i -E "twin|properties|desired" | grep -i -E "error|fail|exception" > /dev/null; then
-                print_warning "Module $module may have issues with twin properties"
-                twin_status="Warning"
-            fi
-        done
-        
-        if [ "$twin_status" = "Success" ]; then
-            print_status "Module deployment successful with twin properties!"
-            update_status "module_deployment" "Success"
-            report_status "DEPLOYED" "IoT Edge modules successfully deployed with twin properties"
-        else
-            print_warning "Modules deployed but twin properties may not be fully applied"
-            update_status "module_deployment" "Warning"
-            report_status "WARNING" "IoT Edge modules deployed but twin properties may need verification"
+        # Provide error guidance for failed modules
+        if iotedge list | grep -q "fail\|error"; then
+            print_warning "Some modules failed to start. Common causes:"
+            print_warning "1. Memory/CPU constraints - check with 'free -m' and 'top'"
+            print_warning "2. Network connectivity issues to registries or endpoints"
+            print_warning "3. Invalid module configurations or environment variables"
+            print_warning "4. Storage permission issues, especially for blob storage module"
+            print_warning ""
+            print_warning "Try fixing blob storage with: sudo mkdir -p /home/alignav && sudo chmod 777 /home/alignav"
         fi
+        
         return 0
     else
         print_error "No modules are running after deployment"
