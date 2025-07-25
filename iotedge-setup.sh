@@ -573,7 +573,12 @@ fi
 
 # Enable Docker to start on boot
 check_command "systemctl enable docker" "Failed to enable container engine to start on boot" "container_engine" 3 5
-
+print_status "Creating AlignAV directory..."
+mkdir -p /home/alignav
+ 
+# Set proper ownership and permissions
+chown -R 1000:1000 /home/alignav
+chmod -R 755 /home/alignav
 report_status "INSTALLING" "Installing IoT Edge runtime"
 print_status "Installing Azure IoT Edge runtime..."
 
