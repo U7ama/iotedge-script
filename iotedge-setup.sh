@@ -2,8 +2,6 @@
 
 # =========================================================
 # Azure IoT Edge One-Command Setup Script
-# Generated: 2025-05-08 07:47:09
-# Author: Ha7him123
 # =========================================================
 
 # Colors for terminal output
@@ -295,8 +293,15 @@ report_status() {
 
 # Function to check if a package is installed
 is_package_installed() {
-    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
-    return $?
+    if [ -f /etc/redhat-release ]; then
+        # For RHEL systems
+        rpm -q "$1" >/dev/null 2>&1
+        return $?
+    else
+        # For Debian/Ubuntu systems
+        dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+        return $?
+    fi
 }
 
 # Function to check if IoT Edge is already installed and configured
@@ -414,144 +419,68 @@ fi
 report_status "INSTALLING" "Starting IoT Edge installation"
 print_status "Installing dependencies..."
 
-# Update package repositories
-apt-get update || {
-    print_warning "Failed to update package repositories, retrying with error handling"
-    check_command "apt-get update" "Failed to update package repositories after retries" "prerequisites" 3 5
-}
-
-# Install curl and other prerequisites if not already installed
-if ! is_package_installed "curl" || ! is_package_installed "gnupg2" || ! is_package_installed "apt-transport-https"; then
-    print_status "Installing prerequisites..."
-    check_command "apt-get install -y curl gnupg2 apt-transport-https ca-certificates" "Failed to install prerequisites" "prerequisites" 3 5
-else
-    print_status "Prerequisites already installed"
-    update_status "prerequisites" "Success"
-fi
-
-print_status "Adding Microsoft package repository..."
-
-# Add Microsoft's package repository
-case "$OS" in
-    "Ubuntu")
-        case "$VERSION_ID" in
-            "20.04")
-                curl https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                ;;
-            "22.04")
-                curl https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                ;;
-            "24.04")
-                curl https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                ;;
-            *)
-                print_warning "Unsupported Ubuntu version: $VERSION_ID, trying to use closest version..."
-                if [[ "$VERSION_ID" > "24.04" ]]; then
-                    curl https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                elif [[ "$VERSION_ID" > "22.04" ]]; then
-                    curl https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                else
-                    curl https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                fi
-                ;;
-        esac
-        ;;
-    "Debian")
-        case "$VERSION_ID" in
-            "10")
-                curl https://packages.microsoft.com/config/debian/10/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                ;;
-            "11")
-                curl https://packages.microsoft.com/config/debian/11/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                ;;
-            "12")
-                curl https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                ;;
-            *)
-                print_warning "Unsupported Debian version: $VERSION_ID, trying to use closest version..."
-                if [[ "$VERSION_ID" > "12" ]]; then
-                    curl https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                elif [[ "$VERSION_ID" > "11" ]]; then
-                    curl https://packages.microsoft.com/config/debian/11/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                else
-                    curl https://packages.microsoft.com/config/debian/10/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
-                fi
-                ;;
-        esac
-        ;;
-    *)
-        # Handle other distributions like CentOS, RHEL or unknown cases
-        print_warning "OS $OS is not officially supported by this script"
-        print_warning "Attempting to continue, but installation might fail"
-        update_status "microsoft_repo" "Skipped (Unsupported OS)"
-        
-        # Try to determine if it's a Red Hat based system
-        if [ -f /etc/redhat-release ]; then
-            print_warning "Detected Red Hat based system, using manual installation method"
-            
-            # Install IoT Edge for RHEL/CentOS
-            check_command "curl -L https://aka.ms/libiothsm-std-linux-armhf.tar.gz -o libiothsm-std.tar.gz && tar -xvf libiothsm-std.tar.gz && rm libiothsm-std.tar.gz" "Failed to download IoT Edge dependencies" "microsoft_repo" 3 5
-            
-            report_status "ERROR" "Unsupported OS: $OS. Please use Ubuntu or Debian"
-            exit 1
-        else
-            report_status "ERROR" "Unsupported OS: $OS"
-            exit 1
-        fi
-        ;;
-esac
-
-# If we get here, we have the .deb file for Microsoft's repo
-if [ -f packages-microsoft-prod.deb ]; then
-    check_command "dpkg -i packages-microsoft-prod.deb" "Failed to install Microsoft package repository" "microsoft_repo" 3 5
-    rm packages-microsoft-prod.deb
-else
-    print_error "Failed to download Microsoft package repository"
-    update_status "microsoft_repo" "Failed"
-    report_status "ERROR" "Failed to download Microsoft package repository"
-    exit 1
-fi
-
-report_status "INSTALLING" "Installing container engine (Moby)"
-print_status "Installing container engine..."
-
-# Check if container engine is already installed
-if command -v docker >/dev/null 2>&1; then
-    print_status "Docker container engine is already installed"
-    update_status "container_engine" "Docker Already Installed"
-elif command -v moby-engine >/dev/null 2>&1 || is_package_installed "moby-engine"; then
-    print_status "Moby container engine is already installed"
-    update_status "container_engine" "Moby Already Installed"
-else
-    # Install container runtime (Moby)
-    apt-get update
-    check_command "apt-get install -y moby-engine" "Failed to install container engine" "container_engine" 3 10
-fi
-
-# Configure container log size limits to avoid disk filling up
-print_status "Configuring container engine logging..."
-
-# Check if daemon.json already exists and contains log configuration
-if [ -f /etc/docker/daemon.json ]; then
-    print_status "Container engine config file exists, checking configuration..."
+# Handle OS-specific installation
+if [ -f /etc/redhat-release ] || [[ "$OS" == *"Red Hat"* ]]; then
+    # RHEL specific installation
+    print_status "Detected Red Hat based system, using RHEL installation method"
+    update_status "prerequisites" "In Progress (RHEL)"
     
-    # Check if log configuration already exists
-    if grep -q "log-driver" /etc/docker/daemon.json; then
-        print_status "Log configuration already exists, skipping modification"
+    # Install prerequisites
+    check_command "yum install -y curl gnupg2 ca-certificates" "Failed to install prerequisites" "prerequisites" 3 5
+    
+    # Add Microsoft repository for RHEL
+    print_status "Adding Microsoft package repository for RHEL..."
+    if [[ "$VERSION_ID" == 9* ]]; then
+        check_command "wget https://packages.microsoft.com/config/rhel/9.0/packages-microsoft-prod.rpm -O packages-microsoft-prod.rpm" "Failed to download Microsoft package repository" "microsoft_repo" 3 5
     else
-        print_status "Adding log configuration to existing config file"
-        # Create backup of original file
-        cp /etc/docker/daemon.json /etc/docker/daemon.json.bak
-        
-        # Add log configuration to existing file (this is a simplistic approach, might need improvement)
-        sed -i 's/{/{\n    "log-driver": "local",\n    "log-opts": {\n        "max-size": "10m",\n        "max-file": "3"\n    },/g' /etc/docker/daemon.json
+        # Default to RHEL 8 for older versions
+        check_command "wget https://packages.microsoft.com/config/rhel/8/packages-microsoft-prod.rpm -O packages-microsoft-prod.rpm" "Failed to download Microsoft package repository" "microsoft_repo" 3 5
     fi
-else
-    # Create directory if it doesn't exist
-    mkdir -p /etc/docker
     
-    # Create new config file
-    cat > /etc/docker/daemon.json <<EOF
+    # Install the repository package
+    check_command "yum localinstall -y packages-microsoft-prod.rpm" "Failed to install Microsoft package repository" "microsoft_repo" 3 5
+    rm packages-microsoft-prod.rpm
+    
+    # Install container runtime (Moby)
+    report_status "INSTALLING" "Installing container engine (Moby)"
+    print_status "Installing container engine for RHEL..."
+    
+    # Check if container engine is already installed
+    if command -v docker >/dev/null 2>&1; then
+        print_status "Docker container engine is already installed"
+        update_status "container_engine" "Docker Already Installed"
+    elif command -v moby-engine >/dev/null 2>&1 || is_package_installed "moby-engine"; then
+        print_status "Moby container engine is already installed"
+        update_status "container_engine" "Moby Already Installed"
+    else
+        # Install container runtime (Moby)
+        check_command "yum install -y moby-engine moby-cli" "Failed to install container engine" "container_engine" 3 10
+    fi
+    
+    # Configure container log size limits to avoid disk filling up
+    print_status "Configuring container engine logging..."
+    
+    # Check if daemon.json already exists and contains log configuration
+    if [ -f /etc/docker/daemon.json ]; then
+        print_status "Container engine config file exists, checking configuration..."
+        
+        # Check if log configuration already exists
+        if grep -q "log-driver" /etc/docker/daemon.json; then
+            print_status "Log configuration already exists, skipping modification"
+        else
+            print_status "Adding log configuration to existing config file"
+            # Create backup of original file
+            cp /etc/docker/daemon.json /etc/docker/daemon.json.bak
+            
+            # Add log configuration to existing file (this is a simplistic approach, might need improvement)
+            sed -i 's/{/{\n    "log-driver": "local",\n    "log-opts": {\n        "max-size": "10m",\n        "max-file": "3"\n    },/g' /etc/docker/daemon.json
+        fi
+    else
+        # Create directory if it doesn't exist
+        mkdir -p /etc/docker
+        
+        # Create new config file
+        cat > /etc/docker/daemon.json <<EOF
 {
     "log-driver": "local",
     "log-opts": {
@@ -560,36 +489,213 @@ else
     }
 }
 EOF
-fi
-
-# Restart Docker to apply logging configuration
-if systemctl is-active docker >/dev/null 2>&1; then
-    print_status "Restarting container engine to apply configuration..."
-    check_command "systemctl restart docker" "Failed to restart container engine" "container_engine" 3 5
+    fi
+    
+    # Restart Docker to apply logging configuration
+    if systemctl is-active docker >/dev/null 2>&1; then
+        print_status "Restarting container engine to apply configuration..."
+        check_command "systemctl restart docker" "Failed to restart container engine" "container_engine" 3 5
+    else
+        print_status "Starting container engine..."
+        check_command "systemctl start docker" "Failed to start container engine" "container_engine" 3 5
+    fi
+    
+    # Enable Docker to start on boot
+    check_command "systemctl enable docker" "Failed to enable container engine to start on boot" "container_engine" 3 5
+    
+    # Install IoT Edge runtime
+    report_status "INSTALLING" "Installing IoT Edge runtime"
+    print_status "Installing Azure IoT Edge runtime for RHEL..."
+    check_command "yum install -y aziot-edge" "Failed to install Azure IoT Edge runtime" "iotedge_runtime" 3 10
+    
 else
-    print_status "Starting container engine..."
-    check_command "systemctl start docker" "Failed to start container engine" "container_engine" 3 5
+    # Ubuntu/Debian specific installation
+    # Update package repositories
+    apt-get update || {
+        print_warning "Failed to update package repositories, retrying with error handling"
+        check_command "apt-get update" "Failed to update package repositories after retries" "prerequisites" 3 5
+    }
+    
+    # Install curl and other prerequisites if not already installed
+    if ! is_package_installed "curl" || ! is_package_installed "gnupg2" || ! is_package_installed "apt-transport-https"; then
+        print_status "Installing prerequisites..."
+        check_command "apt-get install -y curl gnupg2 apt-transport-https ca-certificates" "Failed to install prerequisites" "prerequisites" 3 5
+    else
+        print_status "Prerequisites already installed"
+        update_status "prerequisites" "Success"
+    fi
+    
+    print_status "Adding Microsoft package repository..."
+    
+    # Add Microsoft's package repository
+    case "$OS" in
+        "Ubuntu")
+            case "$VERSION_ID" in
+                "20.04")
+                    curl https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    ;;
+                "22.04")
+                    curl https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    ;;
+                "24.04")
+                    curl https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    ;;
+                *)
+                    print_warning "Unsupported Ubuntu version: $VERSION_ID, trying to use closest version..."
+                    if [[ "$VERSION_ID" > "24.04" ]]; then
+                        curl https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    elif [[ "$VERSION_ID" > "22.04" ]]; then
+                        curl https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    else
+                        curl https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    fi
+                    ;;
+            esac
+            ;;
+        "Debian")
+            case "$VERSION_ID" in
+                "10")
+                    curl https://packages.microsoft.com/config/debian/10/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    ;;
+                "11")
+                    curl https://packages.microsoft.com/config/debian/11/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    ;;
+                "12")
+                    curl https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    ;;
+                *)
+                    print_warning "Unsupported Debian version: $VERSION_ID, trying to use closest version..."
+                    if [[ "$VERSION_ID" > "12" ]]; then
+                        curl https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    elif [[ "$VERSION_ID" > "11" ]]; then
+                        curl https://packages.microsoft.com/config/debian/11/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    else
+                        curl https://packages.microsoft.com/config/debian/10/packages-microsoft-prod.deb -o packages-microsoft-prod.deb
+                    fi
+                    ;;
+            esac
+            ;;
+        *)
+            # Handle other distributions like CentOS, RHEL or unknown cases
+            print_warning "OS $OS is not officially supported by this script"
+            print_warning "Attempting to continue, but installation might fail"
+            update_status "microsoft_repo" "Skipped (Unsupported OS)"
+            
+            # Try to determine if it's a Red Hat based system
+            if [ -f /etc/redhat-release ]; then
+                print_warning "Detected Red Hat based system, using manual installation method"
+                
+                # Install IoT Edge for RHEL/CentOS
+                check_command "curl -L https://aka.ms/libiothsm-std-linux-armhf.tar.gz -o libiothsm-std.tar.gz && tar -xvf libiothsm-std.tar.gz && rm libiothsm-std.tar.gz" "Failed to download IoT Edge dependencies" "microsoft_repo" 3 5
+                
+                report_status "ERROR" "Unsupported OS: $OS. Please use Ubuntu or Debian"
+                exit 1
+            else
+                report_status "ERROR" "Unsupported OS: $OS"
+                exit 1
+            fi
+            ;;
+    esac
+    
+    # If we get here, we have the .deb file for Microsoft's repo
+    if [ -f packages-microsoft-prod.deb ]; then
+        check_command "dpkg -i packages-microsoft-prod.deb" "Failed to install Microsoft package repository" "microsoft_repo" 3 5
+        rm packages-microsoft-prod.deb
+    else
+        print_error "Failed to download Microsoft package repository"
+        update_status "microsoft_repo" "Failed"
+        report_status "ERROR" "Failed to download Microsoft package repository"
+        exit 1
+    fi
+    
+    report_status "INSTALLING" "Installing container engine (Moby)"
+    print_status "Installing container engine..."
+    
+    # Check if container engine is already installed
+    if command -v docker >/dev/null 2>&1; then
+        print_status "Docker container engine is already installed"
+        update_status "container_engine" "Docker Already Installed"
+    elif command -v moby-engine >/dev/null 2>&1 || is_package_installed "moby-engine"; then
+        print_status "Moby container engine is already installed"
+        update_status "container_engine" "Moby Already Installed"
+    else
+        # Install container runtime (Moby)
+        apt-get update
+        check_command "apt-get install -y moby-engine" "Failed to install container engine" "container_engine" 3 10
+    fi
+    
+    # Configure container log size limits to avoid disk filling up
+    print_status "Configuring container engine logging..."
+    
+    # Check if daemon.json already exists and contains log configuration
+    if [ -f /etc/docker/daemon.json ]; then
+        print_status "Container engine config file exists, checking configuration..."
+        
+        # Check if log configuration already exists
+        if grep -q "log-driver" /etc/docker/daemon.json; then
+            print_status "Log configuration already exists, skipping modification"
+        else
+            print_status "Adding log configuration to existing config file"
+            # Create backup of original file
+            cp /etc/docker/daemon.json /etc/docker/daemon.json.bak
+            
+            # Add log configuration to existing file (this is a simplistic approach, might need improvement)
+            sed -i 's/{/{\n    "log-driver": "local",\n    "log-opts": {\n        "max-size": "10m",\n        "max-file": "3"\n    },/g' /etc/docker/daemon.json
+        fi
+    else
+        # Create directory if it doesn't exist
+        mkdir -p /etc/docker
+        
+        # Create new config file
+        cat > /etc/docker/daemon.json <<EOF
+{
+    "log-driver": "local",
+    "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
+    }
+}
+EOF
+    fi
+    
+    # Restart Docker to apply logging configuration
+    if systemctl is-active docker >/dev/null 2>&1; then
+        print_status "Restarting container engine to apply configuration..."
+        check_command "systemctl restart docker" "Failed to restart container engine" "container_engine" 3 5
+    else
+        print_status "Starting container engine..."
+        check_command "systemctl start docker" "Failed to start container engine" "container_engine" 3 5
+    fi
+    
+    # Enable Docker to start on boot
+    check_command "systemctl enable docker" "Failed to enable container engine to start on boot" "container_engine" 3 5
+    
+    print_status "Creating AlignAV directory..."
+    mkdir -p /home/alignav
+     
+    # Set proper ownership and permissions
+    chown -R 1000:1000 /home/alignav
+    chmod -R 755 /home/alignav
+    
+    report_status "INSTALLING" "Installing IoT Edge runtime"
+    print_status "Installing Azure IoT Edge runtime..."
+    
+    # Install IoT Edge runtime if not already installed
+    if ! is_package_installed "aziot-edge"; then
+        apt-get update
+        check_command "apt-get install -y aziot-edge" "Failed to install Azure IoT Edge runtime" "iotedge_runtime" 3 10
+    else
+        print_status "Azure IoT Edge runtime is already installed"
+        update_status "iotedge_runtime" "Already Installed"
+    fi
 fi
 
-# Enable Docker to start on boot
-check_command "systemctl enable docker" "Failed to enable container engine to start on boot" "container_engine" 3 5
 print_status "Creating AlignAV directory..."
 mkdir -p /home/alignav
  
 # Set proper ownership and permissions
 chown -R 1000:1000 /home/alignav
 chmod -R 755 /home/alignav
-report_status "INSTALLING" "Installing IoT Edge runtime"
-print_status "Installing Azure IoT Edge runtime..."
-
-# Install IoT Edge runtime if not already installed
-if ! is_package_installed "aziot-edge"; then
-    apt-get update
-    check_command "apt-get install -y aziot-edge" "Failed to install Azure IoT Edge runtime" "iotedge_runtime" 3 10
-else
-    print_status "Azure IoT Edge runtime is already installed"
-    update_status "iotedge_runtime" "Already Installed"
-fi
 
 report_status "CONFIGURING" "Configuring IoT Edge"
 print_status "Configuring IoT Edge with connection string..."
