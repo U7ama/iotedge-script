@@ -379,6 +379,24 @@ if [ $iotedge_status_code -eq 0 ]; then
     # Force reconfiguration
     check_command "iotedge config mp --force --connection-string '$CONNECTION_STRING'" "Failed to reconfigure IoT Edge" "iotedge_config" 3 5
     
+    # Configure image garbage collection
+    print_status "Configuring image garbage collection..."
+    
+    # Create temporary file with garbage collection settings
+    cat > /tmp/garbage_collection.toml <<EOF
+
+# Image garbage collection settings
+[image_garbage_collection]
+enabled = true
+cleanup_recurrence = "1d"
+image_age_cleanup_threshold = "7d" 
+cleanup_time = "00:00"
+EOF
+    
+    # Append garbage collection settings to the config
+    check_command "cat /tmp/garbage_collection.toml >> /etc/aziot/config.toml" "Failed to add garbage collection settings" "iotedge_config" 3 5
+    rm /tmp/garbage_collection.toml
+    
     # Apply configuration
     print_status "Applying IoT Edge configuration..."
     check_command "iotedge config apply" "Failed to apply IoT Edge configuration" "iotedge_config" 3 5
@@ -711,6 +729,24 @@ else
     # Create configuration
     check_command "iotedge config mp --connection-string '$CONNECTION_STRING'" "Failed to create IoT Edge configuration" "iotedge_config" 3 5
 fi
+
+# Add image garbage collection configuration
+print_status "Configuring image garbage collection..."
+
+# Create temporary file with garbage collection settings
+cat > /tmp/garbage_collection.toml <<EOF
+
+# Image garbage collection settings
+[image_garbage_collection]
+enabled = true
+cleanup_recurrence = "1d"
+image_age_cleanup_threshold = "7d" 
+cleanup_time = "00:00"
+EOF
+
+# Append garbage collection settings to the config
+check_command "cat /tmp/garbage_collection.toml >> /etc/aziot/config.toml" "Failed to add garbage collection settings" "iotedge_config" 3 5
+rm /tmp/garbage_collection.toml
 
 # Apply configuration
 print_status "Applying IoT Edge configuration..."
