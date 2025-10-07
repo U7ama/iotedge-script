@@ -389,7 +389,7 @@ if [ $iotedge_status_code -eq 0 ]; then
 [image_garbage_collection]
 enabled = true
 cleanup_recurrence = "1d"
-image_age_cleanup_threshold = "7d" 
+image_age_cleanup_threshold = "2d" 
 cleanup_time = "00:00"
 EOF
     
@@ -740,7 +740,7 @@ cat > /tmp/garbage_collection.toml <<EOF
 [image_garbage_collection]
 enabled = true
 cleanup_recurrence = "1d"
-image_age_cleanup_threshold = "7d" 
+image_age_cleanup_threshold = "2d" 
 cleanup_time = "00:00"
 EOF
 
