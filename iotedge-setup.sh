@@ -175,6 +175,8 @@ STATUS_TRACKER["iotedge_service"]="Not Started"
 STATUS_TRACKER["edge_agent"]="Not Started"
 STATUS_TRACKER["edge_hub"]="Not Started"
 STATUS_TRACKER["connectivity"]="Not Started"
+STATUS_TRACKER["cleanup_script"]="Not Started"
+STATUS_TRACKER["cleanup_cron"]="Not Started"
 
 update_status() {
     local component="$1"
@@ -219,6 +221,8 @@ print_installation_summary() {
     echo -e "Edge Agent Module: $(format_status "${STATUS_TRACKER["edge_agent"]}")"
     echo -e "Edge Hub Module: $(format_status "${STATUS_TRACKER["edge_hub"]}")"
     echo -e "IoT Hub Connectivity: $(format_status "${STATUS_TRACKER["connectivity"]}")"
+    echo -e "Docker Cleanup Script: $(format_status "${STATUS_TRACKER["cleanup_script"]}")"
+    echo -e "Cleanup Script Cron Job: $(format_status "${STATUS_TRACKER["cleanup_cron"]}")"
     
     print_header "======================================================"
     
@@ -258,6 +262,7 @@ print_installation_summary() {
         print_header "Next Steps:"
         print_header "1. Return to the deployment portal"
         print_header "2. Deploy your desired modules to this device"
+        print_header "3. The Docker cleanup script will run automatically every day at 2:00 AM."
         print_header "======================================================"
     fi
 
@@ -494,6 +499,114 @@ EOF
         update_status "iotedge_config" "Failed"
         return 1
     fi
+}
+
+# Function to install the dynamic Docker cleanup script
+install_cleanup_script() {
+    print_header "Installing Dynamic Docker Cleanup Script and Cron Job"
+    
+    local script_path="/usr/local/bin/docker-cleanup-builds.sh"
+    
+    print_status "Creating cleanup script at $script_path"
+    update_status "cleanup_script" "In Progress"
+    
+    # Use a here-document to create the script file.
+    # Using 'EOF' ensures that variables inside the here-doc are not expanded.
+    cat > "$script_path" << 'EOF'
+#!/bin/bash
+# Dynamic Docker cleanup script for IoT Edge modules
+# Automatically discovers all module images and keeps only the last 2 builds
+
+LOG_FILE="/var/log/docker-cleanup.log"
+KEEP_LAST_N=2  # Number of builds to keep per module
+
+echo "$(date) - Starting dynamic Docker cleanup" >> "$LOG_FILE"
+
+# Get unique repository names (excluding Microsoft base images)
+REPOS=$(docker images --format "{{.Repository}}" | \
+        grep -v "mcr.microsoft.com" | \
+        grep -v "<none>" | \
+        sort -u)
+
+if [ -z "$REPOS" ]; then
+    echo "$(date) - No custom repositories found" >> "$LOG_FILE"
+    exit 0
+fi
+
+echo "$(date) - Found repositories:" >> "$LOG_FILE"
+echo "$REPOS" >> "$LOG_FILE"
+
+# Process each repository
+for repo in $REPOS; do
+    echo "$(date) - Processing repository: $repo" >> "$LOG_FILE"
+    
+    # Count images for this repository
+    IMAGE_COUNT=$(docker images "$repo" --format "{{.ID}}" | wc -l)
+    echo "$(date) -   Found $IMAGE_COUNT images" >> "$LOG_FILE"
+    
+    # If more than KEEP_LAST_N images, delete the oldest ones
+    if [ "$IMAGE_COUNT" -gt "$KEEP_LAST_N" ]; then
+        IMAGES_TO_DELETE=$((IMAGE_COUNT - KEEP_LAST_N))
+        echo "$(date) -   Deleting $IMAGES_TO_DELETE old image(s)" >> "$LOG_FILE"
+        
+        # Get oldest images (sorted by creation date, skip the newest N)
+        docker images "$repo" --format "{{.ID}} {{.CreatedAt}}" | \
+        sort -k2 -r | \
+        tail -n +$((KEEP_LAST_N + 1)) | \
+        awk '{print $1}' | \
+        xargs -r docker rmi -f >> "$LOG_FILE" 2>&1
+    else
+        echo "$(date) -   Keeping all $IMAGE_COUNT image(s) (within limit)" >> "$LOG_FILE"
+    fi
+done
+
+echo "$(date) - Dynamic cleanup complete" >> "$LOG_FILE"
+
+# Show current disk usage
+echo "$(date) - Current Docker disk usage:" >> "$LOG_FILE"
+docker system df >> "$LOG_FILE" 2>&1
+EOF
+
+    if [ $? -ne 0 ]; then
+        print_error "Failed to create cleanup script file."
+        update_status "cleanup_script" "Failed"
+        return 1
+    fi
+    
+    print_status "Making cleanup script executable..."
+    chmod +x "$script_path"
+    
+    if [ $? -ne 0 ]; then
+        print_error "Failed to make cleanup script executable."
+        update_status "cleanup_script" "Failed"
+        return 1
+    fi
+    
+    print_status "Cleanup script installed successfully."
+    update_status "cleanup_script" "Success"
+    
+    # Setup cron job
+    print_status "Setting up daily cron job for cleanup script..."
+    update_status "cleanup_cron" "In Progress"
+    local cron_file="/etc/cron.d/docker-cleanup-builds"
+    
+    # Create a cron job file that runs the script at 2:00 AM every day.
+    # The output is redirected to null because the script handles its own logging.
+    echo "0 2 * * * root $script_path >/dev/null 2>&1" > "$cron_file"
+    
+    if [ $? -ne 0 ]; then
+        print_error "Failed to create cron job file at $cron_file."
+        update_status "cleanup_cron" "Failed"
+        return 1
+    fi
+    
+    # Set correct permissions for the cron file
+    chmod 0644 "$cron_file"
+    
+    print_status "Cron job created successfully. It will run daily at 2:00 AM."
+    update_status "cleanup_cron" "Success"
+    
+    return 0
 }
 
 
@@ -735,6 +848,9 @@ else
     print_warning "Edge Hub is not running yet. It must be deployed via IoT Hub."
     update_status "edge_hub" "Not Running"
 fi
+
+# Install the cleanup script before showing the summary
+install_cleanup_script || { print_installation_summary; exit 1; }
 
 print_installation_summary
 
