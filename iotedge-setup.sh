@@ -363,7 +363,7 @@ clean_iotedge() {
     fi
 
     print_status "Removing IoT Edge directories and certificates..."
-    rm -rf /var/lib/aziot /opt/iotedge /etc/aziot /var/aziot ~/certificates ~/certs
+    rm -rf /var/lib/aziot /var/lib/edgehub /opt/iotedge /etc/aziot /var/aziot ~/certificates ~/certs
     rm -f /usr/local/share/ca-certificates/azure-iot-test-only.root.ca.cert.pem.crt
     if command -v update-ca-certificates &>/dev/null; then
         update-ca-certificates --fresh &>/dev/null
@@ -725,7 +725,7 @@ fi
 # Configure container log size limits
 print_status "Configuring container engine logging..."
 mkdir -p /etc/docker
-if [ ! -f /etc/docker/daemon.json ] || ! grep -q "log-driver" /etc/docker/daemon.json; then
+if [ ! -f /etc/docker/daemon.json ] || ! grep -q "log-driver" /etc/docker/daemon.json || ! grep -q "\"dns\"" /etc/docker/daemon.json; then
     cat > /etc/docker/daemon.json <<EOF
 {
     "log-driver": "local",
@@ -733,12 +733,13 @@ if [ ! -f /etc/docker/daemon.json ] || ! grep -q "log-driver" /etc/docker/daemon
         "max-size": "10m",
         "max-file": "3"
     },
+    "dns": ["8.8.8.8", "1.1.1.1"],
     "storage-driver": "overlay2",
     "live-restore": true
 }
 EOF
 else
-    print_status "Log configuration already exists, skipping modification"
+    print_status "Docker configuration (logging + DNS) already exists, skipping modification"
 fi
 
 # Restart and enable Docker
